@@ -460,6 +460,7 @@ func (r *Reader) ReadMIMEHeader() (MIMEHeader, error) {
 	// large one ahead of time which we'll cut up into smaller
 	// slices. If this isn't big enough later, we allocate small ones.
 	var strs []string
+	var cerr error // consolidated error
 	hint := r.upcomingHeaderNewlines()
 	if hint > 0 {
 		strs = make([]string, hint)
@@ -469,6 +470,9 @@ func (r *Reader) ReadMIMEHeader() (MIMEHeader, error) {
 	for {
 		kv, err := r.readContinuedLineSlice()
 		if len(kv) == 0 {
+			if err == nil {
+				err = cerr
+			}
 			return m, err
 		}
 
@@ -477,7 +481,11 @@ func (r *Reader) ReadMIMEHeader() (MIMEHeader, error) {
 		// remove them if present.
 		i := bytes.IndexByte(kv, ':')
 		if i < 0 {
-			return m, ProtocolError("malformed MIME header line: " + string(kv))
+			// do NOT return error first until all header had been parsed
+			// so user has the option to choose whether to ignore the error
+			// or not.
+			cerr = ProtocolError("malformed MIME header line: " + string(kv))
+			continue
 		}
 		endKey := i
 		for endKey > 0 && kv[endKey-1] == ' ' {
