@@ -188,6 +188,18 @@ func TestLargeReadMIMEHeader(t *testing.T) {
 	}
 }
 
+// test malformed header and still parsed any valid keys successfully
+func TestReadMIMEHeader2(t *testing.T) {
+	r := reader("my-key: Value 1  \r\nSome corruptions \n Longer Value\r\nmy-Key: Value 2\r\n\n")
+	m, err := r.ReadMIMEHeader()
+	want := MIMEHeader{
+		"My-Key": {"Value 1", "Value 2"},
+	}
+	if !reflect.DeepEqual(m, want) || err == nil {
+		t.Fatalf("ReadMIMEHeader2: %v, %v; want %v", m, err, want)
+	}
+}
+
 // Test that we read slightly-bogus MIME headers seen in the wild,
 // with spaces before colons, and spaces in keys.
 func TestReadMIMEHeaderNonCompliant(t *testing.T) {
