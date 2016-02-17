@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"net/mail"
+	//"net/mail"
 	"strings"
+
+	"github.com/cention-sany/net/mail"
 )
 
 func ExampleParseAddressList() {

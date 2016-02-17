@@ -8,11 +8,13 @@ import (
 	"bytes"
 	"io"
 	"io/ioutil"
-	"mime"
+	//"mime"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cention-sany/mime"
 )
 
 var parseTests = []struct {

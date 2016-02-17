@@ -24,11 +24,14 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"mime"
-	"net/textproto"
+	//"mime"
+	//"net/textproto"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/cention-sany/mime"
+	"github.com/cention-sany/net/textproto"
 )
 
 var debug = debugT(false)
@@ -54,14 +57,14 @@ func ReadMessage(r io.Reader) (msg *Message, err error) {
 	tp := textproto.NewReader(bufio.NewReader(r))
 
 	hdr, err := tp.ReadMIMEHeader()
-	if err != nil {
-		return nil, err
-	}
+	// if err != nil {
+	// 	return nil, err
+	// }
 
 	return &Message{
 		Header: Header(hdr),
 		Body:   tp.R,
-	}, nil
+	}, err
 }
 
 // Layouts suitable for passing to time.Parse.
