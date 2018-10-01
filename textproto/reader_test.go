@@ -1,4 +1,4 @@
-// Copyright 2010 The Go Authors.  All rights reserved.
+// Copyright 2010 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -24,6 +24,12 @@ var canonicalHeaderKeyTests = []canonicalHeaderKeyTest{
 	{"uSER-aGENT", "User-Agent"},
 	{"user-agent", "User-Agent"},
 	{"USER-AGENT", "User-Agent"},
+
+	// Other valid tchar bytes in tokens:
+	{"foo-bar_baz", "Foo-Bar_baz"},
+	{"foo-bar$baz", "Foo-Bar$baz"},
+	{"foo-bar~baz", "Foo-Bar~baz"},
+	{"foo-bar*baz", "Foo-Bar*baz"},
 
 	// Non-ASCII or anything with spaces or non-token chars is unchanged:
 	{"üser-agenT", "üser-agenT"},
@@ -182,18 +188,6 @@ func TestLargeReadMIMEHeader(t *testing.T) {
 	}
 }
 
-// test malformed header and still parsed any valid keys successfully
-func TestReadMIMEHeader2(t *testing.T) {
-	r := reader("my-key: Value 1  \r\nSome corruptions \n Longer Value\r\nmy-Key: Value 2\r\n\n")
-	m, err := r.ReadMIMEHeader()
-	want := MIMEHeader{
-		"My-Key": {"Value 1", "Value 2"},
-	}
-	if !reflect.DeepEqual(m, want) || err == nil {
-		t.Fatalf("ReadMIMEHeader2: %v, %v; want %v", m, err, want)
-	}
-}
-
 // Test that we read slightly-bogus MIME headers seen in the wild,
 // with spaces before colons, and spaces in keys.
 func TestReadMIMEHeaderNonCompliant(t *testing.T) {
@@ -214,6 +208,24 @@ func TestReadMIMEHeaderNonCompliant(t *testing.T) {
 	}
 	if !reflect.DeepEqual(m, want) || err != nil {
 		t.Fatalf("ReadMIMEHeader =\n%v, %v; want:\n%v", m, err, want)
+	}
+}
+
+func TestReadMIMEHeaderMalformed(t *testing.T) {
+	inputs := []string{
+		"No colon first line\r\nFoo: foo\r\n\r\n",
+		" No colon first line with leading space\r\nFoo: foo\r\n\r\n",
+		"\tNo colon first line with leading tab\r\nFoo: foo\r\n\r\n",
+		" First: line with leading space\r\nFoo: foo\r\n\r\n",
+		"\tFirst: line with leading tab\r\nFoo: foo\r\n\r\n",
+		"Foo: foo\r\nNo colon second line\r\n\r\n",
+	}
+
+	for _, input := range inputs {
+		r := reader(input)
+		if m, err := r.ReadMIMEHeader(); err == nil {
+			t.Errorf("ReadMIMEHeader(%q) = %v, %v; want nil, err", input, m, err)
+		}
 	}
 }
 
@@ -293,6 +305,35 @@ func TestRFC959Lines(t *testing.T) {
 		if msg != tt.wantMsg {
 			t.Errorf("#%d: msg=%q, want %q", i, msg, tt.wantMsg)
 		}
+	}
+}
+
+// Test that multi-line errors are appropriately and fully read. Issue 10230.
+func TestReadMultiLineError(t *testing.T) {
+	r := reader("550-5.1.1 The email account that you tried to reach does not exist. Please try\n" +
+		"550-5.1.1 double-checking the recipient's email address for typos or\n" +
+		"550-5.1.1 unnecessary spaces. Learn more at\n" +
+		"Unexpected but legal text!\n" +
+		"550 5.1.1 https://support.google.com/mail/answer/6596 h20si25154304pfd.166 - gsmtp\n")
+
+	wantMsg := "5.1.1 The email account that you tried to reach does not exist. Please try\n" +
+		"5.1.1 double-checking the recipient's email address for typos or\n" +
+		"5.1.1 unnecessary spaces. Learn more at\n" +
+		"Unexpected but legal text!\n" +
+		"5.1.1 https://support.google.com/mail/answer/6596 h20si25154304pfd.166 - gsmtp"
+
+	code, msg, err := r.ReadResponse(250)
+	if err == nil {
+		t.Errorf("ReadResponse: no error, want error")
+	}
+	if code != 550 {
+		t.Errorf("ReadResponse: code=%d, want %d", code, 550)
+	}
+	if msg != wantMsg {
+		t.Errorf("ReadResponse: msg=%q, want %q", msg, wantMsg)
+	}
+	if err.Error() != "550 "+wantMsg {
+		t.Errorf("ReadResponse: error=%q, want %q", err.Error(), "550 "+wantMsg)
 	}
 }
 

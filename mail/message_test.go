@@ -8,13 +8,11 @@ import (
 	"bytes"
 	"io"
 	"io/ioutil"
-	//"mime"
+	"mime"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/cention-sany/mime"
 )
 
 var parseTests = []struct {
@@ -94,7 +92,7 @@ func TestDateParsing(t *testing.T) {
 			"Fri, 21 Nov 1997 09:55:06 -0600",
 			time.Date(1997, 11, 21, 9, 55, 6, 0, time.FixedZone("", -6*60*60)),
 		},
-		// RFC5322, Appendix A.6.2
+		// RFC 5322, Appendix A.6.2
 		// Obsolete date.
 		{
 			"21 Nov 97 09:55:06 GMT",
@@ -112,20 +110,47 @@ func TestDateParsing(t *testing.T) {
 		}
 		date, err := hdr.Date()
 		if err != nil {
-			t.Errorf("Failed parsing %q: %v", test.dateStr, err)
-			continue
+			t.Errorf("Header(Date: %s).Date(): %v", test.dateStr, err)
+		} else if !date.Equal(test.exp) {
+			t.Errorf("Header(Date: %s).Date() = %+v, want %+v", test.dateStr, date, test.exp)
 		}
-		if !date.Equal(test.exp) {
-			t.Errorf("Parse of %q: got %+v, want %+v", test.dateStr, date, test.exp)
+
+		date, err = ParseDate(test.dateStr)
+		if err != nil {
+			t.Errorf("ParseDate(%s): %v", test.dateStr, err)
+		} else if !date.Equal(test.exp) {
+			t.Errorf("ParseDate(%s) = %+v, want %+v", test.dateStr, date, test.exp)
 		}
 	}
 }
 
 func TestAddressParsingError(t *testing.T) {
-	const txt = "=?iso-8859-2?Q?Bogl=E1rka_Tak=E1cs?= <unknown@gmail.com>"
-	_, err := ParseAddress(txt)
-	if err == nil || !strings.Contains(err.Error(), "charset not supported") {
-		t.Errorf(`mail.ParseAddress(%q) err: %q, want ".*charset not supported.*"`, txt, err)
+	mustErrTestCases := [...]struct {
+		text        string
+		wantErrText string
+	}{
+		0:  {"=?iso-8859-2?Q?Bogl=E1rka_Tak=E1cs?= <unknown@gmail.com>", "charset not supported"},
+		1:  {"a@gmail.com b@gmail.com", "expected single address"},
+		2:  {string([]byte{0xed, 0xa0, 0x80}) + " <micro@example.net>", "invalid utf-8 in address"},
+		3:  {"\"" + string([]byte{0xed, 0xa0, 0x80}) + "\" <half-surrogate@example.com>", "invalid utf-8 in quoted-string"},
+		4:  {"\"\\" + string([]byte{0x80}) + "\" <escaped-invalid-unicode@example.net>", "invalid utf-8 in quoted-string"},
+		5:  {"\"\x00\" <null@example.net>", "bad character in quoted-string"},
+		6:  {"\"\\\x00\" <escaped-null@example.net>", "bad character in quoted-string"},
+		7:  {"John Doe", "no angle-addr"},
+		8:  {`<jdoe#machine.example>`, "missing @ in addr-spec"},
+		9:  {`John <middle> Doe <jdoe@machine.example>`, "missing @ in addr-spec"},
+		10: {"cfws@example.com (", "misformatted parenthetical comment"},
+		11: {"empty group: ;", "empty group"},
+		12: {"root group: embed group: null@example.com;", "no angle-addr"},
+		13: {"group not closed: null@example.com", "expected comma"},
+		14: {"group: first@example.com, second@example.com;", "group with multiple addresses"},
+	}
+
+	for i, tc := range mustErrTestCases {
+		_, err := ParseAddress(tc.text)
+		if err == nil || !strings.Contains(err.Error(), tc.wantErrText) {
+			t.Errorf(`mail.ParseAddress(%q) #%d want %q, got %v`, tc.text, i, tc.wantErrText, err)
+		}
 	}
 }
 
@@ -158,6 +183,34 @@ func TestAddressParsing(t *testing.T) {
 			}},
 		},
 		{
+			`"John (middle) Doe" <jdoe@machine.example>`,
+			[]*Address{{
+				Name:    "John (middle) Doe",
+				Address: "jdoe@machine.example",
+			}},
+		},
+		{
+			`John (middle) Doe <jdoe@machine.example>`,
+			[]*Address{{
+				Name:    "John (middle) Doe",
+				Address: "jdoe@machine.example",
+			}},
+		},
+		{
+			`John !@M@! Doe <jdoe@machine.example>`,
+			[]*Address{{
+				Name:    "John !@M@! Doe",
+				Address: "jdoe@machine.example",
+			}},
+		},
+		{
+			`"John <middle> Doe" <jdoe@machine.example>`,
+			[]*Address{{
+				Name:    "John <middle> Doe",
+				Address: "jdoe@machine.example",
+			}},
+		},
+		{
 			`Mary Smith <mary@x.test>, jdoe@example.org, Who? <one@y.test>`,
 			[]*Address{
 				{
@@ -185,9 +238,62 @@ func TestAddressParsing(t *testing.T) {
 				},
 			},
 		},
+		// RFC 5322, Appendix A.6.1
+		{
+			`Joe Q. Public <john.q.public@example.com>`,
+			[]*Address{{
+				Name:    "Joe Q. Public",
+				Address: "john.q.public@example.com",
+			}},
+		},
 		// RFC 5322, Appendix A.1.3
-		// TODO(dsymonds): Group addresses.
-
+		{
+			`group1: groupaddr1@example.com;`,
+			[]*Address{
+				{
+					Name:    "",
+					Address: "groupaddr1@example.com",
+				},
+			},
+		},
+		{
+			`empty group: ;`,
+			[]*Address(nil),
+		},
+		{
+			`A Group:Ed Jones <c@a.test>,joe@where.test,John <jdoe@one.test>;`,
+			[]*Address{
+				{
+					Name:    "Ed Jones",
+					Address: "c@a.test",
+				},
+				{
+					Name:    "",
+					Address: "joe@where.test",
+				},
+				{
+					Name:    "John",
+					Address: "jdoe@one.test",
+				},
+			},
+		},
+		{
+			`Group1: <addr1@example.com>;, Group 2: addr2@example.com;, John <addr3@example.com>`,
+			[]*Address{
+				{
+					Name:    "",
+					Address: "addr1@example.com",
+				},
+				{
+					Name:    "",
+					Address: "addr2@example.com",
+				},
+				{
+					Name:    "John",
+					Address: "addr3@example.com",
+				},
+			},
+		},
 		// RFC 2047 "Q"-encoded ISO-8859-1 address.
 		{
 			`=?iso-8859-1?q?J=F6rg_Doe?= <joerg@example.com>`,
@@ -214,6 +320,16 @@ func TestAddressParsing(t *testing.T) {
 			[]*Address{
 				{
 					Name:    `Jörg Doe`,
+					Address: "joerg@example.com",
+				},
+			},
+		},
+		// RFC 2047 "Q"-encoded UTF-8 address with multiple encoded-words.
+		{
+			`=?utf-8?q?J=C3=B6rg?=  =?utf-8?q?Doe?= <joerg@example.com>`,
+			[]*Address{
+				{
+					Name:    `JörgDoe`,
 					Address: "joerg@example.com",
 				},
 			},
@@ -255,6 +371,139 @@ func TestAddressParsing(t *testing.T) {
 				{
 					Name:    `Asem H.`,
 					Address: "noreply@example.com",
+				},
+			},
+		},
+		// RFC 6532 3.2.3, qtext /= UTF8-non-ascii
+		{
+			`"Gø Pher" <gopher@example.com>`,
+			[]*Address{
+				{
+					Name:    `Gø Pher`,
+					Address: "gopher@example.com",
+				},
+			},
+		},
+		// RFC 6532 3.2, atext /= UTF8-non-ascii
+		{
+			`µ <micro@example.com>`,
+			[]*Address{
+				{
+					Name:    `µ`,
+					Address: "micro@example.com",
+				},
+			},
+		},
+		// RFC 6532 3.2.2, local address parts allow UTF-8
+		{
+			`Micro <µ@example.com>`,
+			[]*Address{
+				{
+					Name:    `Micro`,
+					Address: "µ@example.com",
+				},
+			},
+		},
+		// RFC 6532 3.2.4, domains parts allow UTF-8
+		{
+			`Micro <micro@µ.example.com>`,
+			[]*Address{
+				{
+					Name:    `Micro`,
+					Address: "micro@µ.example.com",
+				},
+			},
+		},
+		// Issue 14866
+		{
+			`"" <emptystring@example.com>`,
+			[]*Address{
+				{
+					Name:    "",
+					Address: "emptystring@example.com",
+				},
+			},
+		},
+		// CFWS
+		{
+			`<cfws@example.com> (CFWS (cfws))  (another comment)`,
+			[]*Address{
+				{
+					Name:    "",
+					Address: "cfws@example.com",
+				},
+			},
+		},
+		{
+			`<cfws@example.com> ()  (another comment), <cfws2@example.com> (another)`,
+			[]*Address{
+				{
+					Name:    "",
+					Address: "cfws@example.com",
+				},
+				{
+					Name:    "",
+					Address: "cfws2@example.com",
+				},
+			},
+		},
+		// Comment as display name
+		{
+			`john@example.com (John Doe)`,
+			[]*Address{
+				{
+					Name:    "John Doe",
+					Address: "john@example.com",
+				},
+			},
+		},
+		// Comment and display name
+		{
+			`John Doe <john@example.com> (Joey)`,
+			[]*Address{
+				{
+					Name:    "John Doe",
+					Address: "john@example.com",
+				},
+			},
+		},
+		// Comment as display name, no space
+		{
+			`john@example.com(John Doe)`,
+			[]*Address{
+				{
+					Name:    "John Doe",
+					Address: "john@example.com",
+				},
+			},
+		},
+		// Comment as display name, Q-encoded
+		{
+			`asjo@example.com (Adam =?utf-8?Q?Sj=C3=B8gren?=)`,
+			[]*Address{
+				{
+					Name:    "Adam Sjøgren",
+					Address: "asjo@example.com",
+				},
+			},
+		},
+		// Comment as display name, Q-encoded and tab-separated
+		{
+			`asjo@example.com (Adam	=?utf-8?Q?Sj=C3=B8gren?=)`,
+			[]*Address{
+				{
+					Name:    "Adam Sjøgren",
+					Address: "asjo@example.com",
+				},
+			},
+		},
+		// Nested comment as display name, Q-encoded
+		{
+			`asjo@example.com (Adam =?utf-8?Q?Sj=C3=B8gren?= (Debian))`,
+			[]*Address{
+				{
+					Name:    "Adam Sjøgren (Debian)",
+					Address: "asjo@example.com",
 				},
 			},
 		},
@@ -451,7 +700,7 @@ func TestAddressParser(t *testing.T) {
 	}
 }
 
-func TestAddressFormatting(t *testing.T) {
+func TestAddressString(t *testing.T) {
 	tests := []struct {
 		addr *Address
 		exp  string
@@ -497,11 +746,41 @@ func TestAddressFormatting(t *testing.T) {
 			&Address{Name: "Böb, Jacöb", Address: "bob@example.com"},
 			`=?utf-8?b?QsO2YiwgSmFjw7Zi?= <bob@example.com>`,
 		},
+		{
+			&Address{Name: "=??Q?x?=", Address: "hello@world.com"},
+			`"=??Q?x?=" <hello@world.com>`,
+		},
+		{
+			&Address{Name: "=?hello", Address: "hello@world.com"},
+			`"=?hello" <hello@world.com>`,
+		},
+		{
+			&Address{Name: "world?=", Address: "hello@world.com"},
+			`"world?=" <hello@world.com>`,
+		},
+		{
+			// should q-encode even for invalid utf-8.
+			&Address{Name: string([]byte{0xed, 0xa0, 0x80}), Address: "invalid-utf8@example.net"},
+			"=?utf-8?q?=ED=A0=80?= <invalid-utf8@example.net>",
+		},
 	}
 	for _, test := range tests {
 		s := test.addr.String()
 		if s != test.exp {
 			t.Errorf("Address%+v.String() = %v, want %v", *test.addr, s, test.exp)
+			continue
+		}
+
+		// Check round-trip.
+		if test.addr.Address != "" && test.addr.Address != "@" {
+			a, err := ParseAddress(test.exp)
+			if err != nil {
+				t.Errorf("ParseAddress(%#q): %v", test.exp, err)
+				continue
+			}
+			if a.Name != test.addr.Name || a.Address != test.addr.Address {
+				t.Errorf("ParseAddress(%#q) = %#v, want %#v", test.exp, a, test.addr)
+			}
 		}
 	}
 }
@@ -579,7 +858,6 @@ func TestAddressParsingAndFormatting(t *testing.T) {
 		`< @example.com>`,
 		`<""test""blah""@example.com>`,
 		`<""@0>`,
-		"<\"\t0\"@0>",
 	}
 
 	for _, test := range badTests {
@@ -595,29 +873,29 @@ func TestAddressParsingAndFormatting(t *testing.T) {
 
 func TestAddressFormattingAndParsing(t *testing.T) {
 	tests := []*Address{
-		&Address{Name: "@lïce", Address: "alice@example.com"},
-		&Address{Name: "Böb O'Connor", Address: "bob@example.com"},
-		&Address{Name: "???", Address: "bob@example.com"},
-		&Address{Name: "Böb ???", Address: "bob@example.com"},
-		&Address{Name: "Böb (Jacöb)", Address: "bob@example.com"},
-		&Address{Name: "à#$%&'(),.:;<>@[]^`{|}~'", Address: "bob@example.com"},
+		{Name: "@lïce", Address: "alice@example.com"},
+		{Name: "Böb O'Connor", Address: "bob@example.com"},
+		{Name: "???", Address: "bob@example.com"},
+		{Name: "Böb ???", Address: "bob@example.com"},
+		{Name: "Böb (Jacöb)", Address: "bob@example.com"},
+		{Name: "à#$%&'(),.:;<>@[]^`{|}~'", Address: "bob@example.com"},
 		// https://golang.org/issue/11292
-		&Address{Name: "\"\\\x1f,\"", Address: "0@0"},
+		{Name: "\"\\\x1f,\"", Address: "0@0"},
 		// https://golang.org/issue/12782
-		&Address{Name: "naé, mée", Address: "test.mail@gmail.com"},
+		{Name: "naé, mée", Address: "test.mail@gmail.com"},
 	}
 
-	for _, test := range tests {
+	for i, test := range tests {
 		parsed, err := ParseAddress(test.String())
 		if err != nil {
-			t.Errorf("ParseAddr(%q) error: %v", test.String(), err)
+			t.Errorf("test #%d: ParseAddr(%q) error: %v", i, test.String(), err)
 			continue
 		}
 		if parsed.Name != test.Name {
-			t.Errorf("Parsed name = %q; want %q", parsed.Name, test.Name)
+			t.Errorf("test #%d: Parsed name = %q; want %q", i, parsed.Name, test.Name)
 		}
 		if parsed.Address != test.Address {
-			t.Errorf("Parsed address = %q; want %q", parsed.Address, test.Address)
+			t.Errorf("test #%d: Parsed address = %q; want %q", i, parsed.Address, test.Address)
 		}
 	}
 }
