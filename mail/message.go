@@ -304,7 +304,7 @@ func (p *addrParser) parseAddress(handleGroup bool) ([]*Address, error) {
 	// addr-spec has a more restricted grammar than name-addr,
 	// so try parsing it first, and fallback to name-addr.
 	// TODO(dsymonds): Is this really correct?
-	spec, err := p.consumeAddrSpec()
+	spec, err := p.consumeAddrSpec(true)
 	if err == nil {
 		var displayName string
 		p.skipSpace()
@@ -343,7 +343,7 @@ func (p *addrParser) parseAddress(handleGroup bool) ([]*Address, error) {
 	if !p.consume('<') {
 		return nil, errors.New("mail: no angle-addr")
 	}
-	spec, err = p.consumeAddrSpec()
+	spec, err = p.consumeAddrSpec(false)
 	if err != nil {
 		return nil, err
 	}
@@ -391,7 +391,7 @@ func (p *addrParser) consumeGroupList() ([]*Address, error) {
 }
 
 // consumeAddrSpec parses a single RFC 5322 addr-spec at the start of p.
-func (p *addrParser) consumeAddrSpec() (spec string, err error) {
+func (p *addrParser) consumeAddrSpec(peekNext bool) (spec string, err error) {
 	debug.Printf("consumeAddrSpec: %q", p.s)
 
 	orig := *p
@@ -440,7 +440,37 @@ func (p *addrParser) consumeAddrSpec() (spec string, err error) {
 		return "", err
 	}
 
+	if peekNext {
+		if !p.peekIfValidNext() {
+			return "", errors.New("mail: invalid next addr-spec")
+		}
+	}
+
 	return localPart + "@" + domain, nil
+}
+
+func (p *addrParser) peekIfValidNext() bool {
+	if p.empty() {
+		return true
+	}
+	orig := *p
+	defer func() {
+		*p = orig
+	}()
+	for {
+		if !p.skipCFWS() {
+			return false
+		}
+		if p.empty() {
+			break
+		}
+		if !p.consume(',') && !p.consume(';') {
+			return false
+		} else {
+			break
+		}
+	}
+	return true
 }
 
 // consumePhrase parses the RFC 5322 phrase at the start of p.
