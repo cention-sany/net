@@ -518,6 +518,28 @@ func TestAddressParsing(t *testing.T) {
 				},
 			},
 		},
+		// malformed email with FWSP
+		{
+			"jdoe@John.Doe <jdoe@machine.example>, jdoe @example.com, jo h n.d oe@example.com, \"你好吗\" <jdoe@john.doe>",
+			[]*Address{
+				{
+					Name:    "jdoe@John.Doe",
+					Address: "jdoe@machine.example",
+				},
+				{
+					Name:    "",
+					Address: "jdoe@example.com",
+				},
+				{
+					Name:    "",
+					Address: `"jo h n.d oe"@example.com`,
+				},
+				{
+					Name:    "你好吗",
+					Address: "jdoe@john.doe",
+				},
+			},
+		},
 	}
 	for _, test := range tests {
 		if len(test.exp) == 1 {

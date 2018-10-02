@@ -161,18 +161,29 @@ func ParseAddressList(list string) ([]*Address, error) {
 type AddressParser struct {
 	// WordDecoder optionally specifies a decoder for RFC 2047 encoded-words.
 	WordDecoder *mime.WordDecoder
+	NoSpace     bool
 }
 
 // Parse parses a single RFC 5322 address of the
 // form "Gogh Fir <gf@example.com>" or "foo@example.com".
 func (p *AddressParser) Parse(address string) (*Address, error) {
-	return (&addrParser{s: address, dec: p.WordDecoder}).parseSingleAddress()
+	ap := &addrParser{
+		s:   address,
+		dec: p.WordDecoder,
+		rs:  p.NoSpace,
+	}
+	return ap.parseSingleAddress()
 }
 
 // ParseList parses the given string as a list of comma-separated addresses
 // of the form "Gogh Fir <gf@example.com>" or "foo@example.com".
 func (p *AddressParser) ParseList(list string) ([]*Address, error) {
-	return (&addrParser{s: list, dec: p.WordDecoder}).parseAddressList()
+	ap := &addrParser{
+		s:   list,
+		dec: p.WordDecoder,
+		rs:  p.NoSpace,
+	}
+	return ap.parseAddressList()
 }
 
 // String formats the address as a valid RFC 5322 address.
@@ -244,6 +255,7 @@ func (a *Address) String() string {
 type addrParser struct {
 	s   string
 	dec *mime.WordDecoder // may be nil
+	rs  bool              // replace space
 }
 
 func (p *addrParser) parseAddressList() ([]*Address, error) {
@@ -402,7 +414,10 @@ func (p *addrParser) consumeAddrSpec(peekNext bool) (spec string, err error) {
 	}()
 
 	// local-part = dot-atom / quoted-string
-	var localPart string
+	var (
+		localPart      string
+		isQuotedString bool
+	)
 	p.skipSpace()
 	if p.empty() {
 		return "", errors.New("mail: no addr-spec")
@@ -410,6 +425,7 @@ func (p *addrParser) consumeAddrSpec(peekNext bool) (spec string, err error) {
 	if p.peek() == '"' {
 		// quoted-string
 		debug.Printf("consumeAddrSpec: parsing quoted-string")
+		isQuotedString = true
 		localPart, err = p.consumeQuotedString()
 		if localPart == "" {
 			err = errors.New("mail: empty quoted string in addr-spec")
@@ -417,7 +433,7 @@ func (p *addrParser) consumeAddrSpec(peekNext bool) (spec string, err error) {
 	} else {
 		// dot-atom
 		debug.Printf("consumeAddrSpec: parsing dot-atom")
-		localPart, err = p.consumeAtom(true, false)
+		localPart, err = p.consumeSpaceableAtom(true, false, true)
 	}
 	if err != nil {
 		debug.Printf("consumeAddrSpec: failed: %v", err)
@@ -435,10 +451,22 @@ func (p *addrParser) consumeAddrSpec(peekNext bool) (spec string, err error) {
 		return "", errors.New("mail: no domain in addr-spec")
 	}
 	// TODO(dsymonds): Handle domain-literal
-	domain, err = p.consumeAtom(true, false)
+	domain, err = p.consumeSpaceableAtom(true, false, true)
 	if err != nil {
 		return "", err
 	}
+
+	if !isQuotedString {
+		if !p.rs {
+			localPart = strings.TrimSpace(localPart)
+			if strings.ContainsRune(localPart, ' ') {
+				localPart = fmt.Sprint(`"`, localPart, `"`)
+			}
+		} else {
+			localPart = strings.Replace(localPart, " ", "", -1)
+		}
+	}
+	domain = strings.Replace(domain, " ", "", -1)
 
 	if peekNext {
 		if !p.peekIfValidNext() {
@@ -447,6 +475,61 @@ func (p *addrParser) consumeAddrSpec(peekNext bool) (spec string, err error) {
 	}
 
 	return localPart + "@" + domain, nil
+}
+
+func (p *addrParser) consumeSpaceableAtom(dot, permissive, space bool) (atom string, err error) {
+	i := 0
+
+Loop:
+	for {
+		r, size := utf8.DecodeRuneInString(p.s[i:])
+		switch {
+		case size == 1 && r == utf8.RuneError:
+			return "", fmt.Errorf("mail: invalid utf-8 in address: %q", p.s)
+
+		case size == 0 || !isSpaceableAtext(r, dot, permissive, space):
+			break Loop
+
+		default:
+			i += size
+
+		}
+	}
+
+	if i == 0 {
+		return "", errors.New("mail: invalid string")
+	}
+	atom, p.s = p.s[:i], p.s[i:]
+	if !permissive {
+		if strings.HasPrefix(atom, ".") {
+			return "", errors.New("mail: leading dot in atom")
+		}
+		if strings.Contains(atom, "..") {
+			return "", errors.New("mail: double dot in atom")
+		}
+		if strings.HasSuffix(atom, ".") {
+			return "", errors.New("mail: trailing dot in atom")
+		}
+	}
+	return atom, nil
+}
+
+func isSpaceableAtext(r rune, dot, permissive, space bool) bool {
+	switch r {
+	case '.':
+		return dot
+
+	case ' ':
+		return space
+
+	// RFC 5322 3.2.3. specials
+	case '(', ')', '[', ']', ';', '@', '\\', ',':
+		return permissive
+
+	case '<', '>', '"', ':':
+		return false
+	}
+	return isVchar(r)
 }
 
 func (p *addrParser) peekIfValidNext() bool {
